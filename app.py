@@ -29,5 +29,8 @@ def sms_reply():
         print("No valid message to send, received:", response)
         return ('', 204)
 
+@app.route('/tmp/<path:filename>', methods=['GET'])
+def download_file(filename):
+    return send_file(f'/tmp/{filename}', as_attachment=True)
 if __name__ == '__main__':
     app.run(debug=True)

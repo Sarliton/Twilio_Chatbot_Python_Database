@@ -4,7 +4,10 @@ from models import Contrato, Chamado
 from context import ConversationContext
 from twilio_helpers import send_auto_messages
 import pandas as pd
-import pdfkit
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from io import BytesIO
+import os
 class ChatBot:
     def __init__(self):
         # Guarda as conversas que o robô está tendo, cada uma com seu próprio telefone
@@ -134,51 +137,62 @@ class SelectReturnState(State):
     
 class GenerateReportState(State):
     def handle_request(self, message):
-        response_messages = self.auto_respond()
-        return response_messages
-    
-    def auto_respond(self):
-        chamados = self.get_calls(self.context.contract_id)
-        if not chamados:
-            return ["Não há chamados registrados para este contrato."]
-        
-        excel_path = self.generate_excel(chamados)
-        pdf_path = self.convert_excel_to_pdf(excel_path)
-        self.send_pdf_via_twilio(pdf_path, self.context.phone_number)
-        
-        self.transition_to(SelectOptionState)
-        return ["Relatório gerado e enviado para o seu número. Por favor, escolha uma opção:\n1. Ver chamados\n2. Gerar relatório"]
-    
-    def get_calls(self, contract_id):
-        return Chamado.query.filter_by(contrato_id=contract_id).order_by(Chamado.data_chamado.desc()).all()
-    
-    def generate_excel(self, chamados):
-        data = [(chamado.id, chamado.descricao, chamado.status, chamado.data_criacao) for chamado in chamados]
-        df_chamados = pd.DataFrame(data, columns=['ID', 'Descrição', 'Status', 'Data de Criação'])
-        excel_path = 'chamados.xlsx'
-        df_chamados.to_excel(excel_path, index=False)
-        return excel_path
-    
-    def convert_excel_to_pdf(self, excel_path):
-        pdf_path = 'chamados.pdf'
-        pdfkit.from_file(excel_path, pdf_path)
-        return pdf_path
-    
-    def send_pdf_via_twilio(self, pdf_path, to_phone_number):
-        account_sid = os.getenv('TWILIO_ACCOUNT_SID')
-        auth_token = os.getenv('TWILIO_AUTH_TOKEN')
-        client = Client(account_sid, auth_token)
-        
-        media_url = f'http://your_domain.com/{pdf_path}'
-        
-        message = client.messages.create(
-            body='Aqui está o relatório de chamados em PDF.',
-            from_='+1234567890',  # Seu número Twilio
-            to=to_phone_number,
-            media_url=[media_url]
-        )
-        
-        return message.sid
+        buffer, msg = self.generate_report(self.context.contract_id)
+        if buffer:
+            # Salve o PDF em um arquivo temporário
+            file_path = f'/tmp/report_{self.context.contract_id}.pdf'
+            with open(file_path, 'wb') as f:
+                f.write(buffer.getvalue())
+
+            # Envie o link para download do relatório
+            ngrok_url = os.getenv('NGROK_URL')  # Certifique-se de definir isso no seu .env
+            file_url = f'{ngrok_url}/tmp/report_{self.context.contract_id}.pdf'
+            self.transition_to(EndState)
+            return [f"Relatório gerado com sucesso! Baixe aqui: {file_url}"]
+        else:
+            return [msg]
+
+    def generate_report(self, contract_id):
+            chamados = Chamado.query.filter_by(contrato_id=contract_id).order_by(Chamado.data_chamado.desc()).all()
+            if not chamados:
+                return None, "Não há chamados registrados para este contrato."
+
+            # Converte os dados dos chamados para um DataFrame do pandas
+            data = [{
+                'ID Chamado': chamado.id,
+                'Descrição': chamado.descricao,
+                'Data Chamado': chamado.data_chamado.strftime('%Y-%m-%d'),
+                'Data Atualização': chamado.data_atualizacao.strftime('%Y-%m-%d'),
+                'Última Atualização': chamado.ultima_atualizacao
+            } for chamado in chamados]
+            df = pd.DataFrame(data)
+
+            # Gera um PDF com os dados do DataFrame
+            buffer = BytesIO()
+            p = canvas.Canvas(buffer, pagesize=letter)
+            p.drawString(100, 750, "Relatório de Chamados")
+
+            x_offset = 50
+            y_offset = 700
+            p.drawString(x_offset, y_offset, "ID Chamado")
+            p.drawString(x_offset + 100, y_offset, "Descrição")
+            p.drawString(x_offset + 300, y_offset, "Data Chamado")
+            p.drawString(x_offset + 400, y_offset, "Data Atualização")
+            p.drawString(x_offset + 500, y_offset, "Última Atualização")
+
+            y_offset -= 20
+            for _, row in df.iterrows():
+                p.drawString(x_offset, y_offset, str(row['ID Chamado']))
+                p.drawString(x_offset + 100, y_offset, row['Descrição'])
+                p.drawString(x_offset + 300, y_offset, row['Data Chamado'])
+                p.drawString(x_offset + 400, y_offset, row['Data Atualização'])
+                p.drawString(x_offset + 500, y_offset, row['Última Atualização'])
+                y_offset -= 20
+
+            p.save()
+            buffer.seek(0)
+            return buffer, "Relatório gerado com sucesso!"
+
 class EndState(State):
     def handle_request(self, message):
         return ['Atendimento concluído. Obrigado por usar nossos serviços!']
